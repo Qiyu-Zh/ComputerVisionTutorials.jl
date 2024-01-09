@@ -271,26 +271,23 @@ function preprocess_data(pair, target_size)
         resized_image = resize_image(pair[1], target_size)
         processed_image = Float32.(reshape(resized_image, size(resized_image)..., 1))
 
-        resized_label = resize_image(pair[2], target_size)
-        one_hot_label = Float32.(one_hot_encode(resized_label, 2))
+        resized_label = reshape(round.(resize_image(pair[2], target_size)),(target_size..., 1))
 
-        return (processed_image, one_hot_label)
+        return (processed_image, resized_label)
     else
         # Handle a batch of pairs
         resized_images = [resize_image(img, target_size) for img in pair[1]]
         processed_images = [Float32.(reshape(img, size(img)..., 1)) for img in resized_images]
 
-        resized_labels = [resize_image(lbl, target_size) for lbl in pair[2]]
-        one_hot_labels = [Float32.(one_hot_encode(lbl, 2)) for lbl in resized_labels]
-
-        return (processed_images, one_hot_labels)
+        resized_labels = [reshape(round.(resize_image(lbl, target_size)), (target_size..., 1)) for lbl in pair[2]]
+        return (processed_images, resized_labels)
     end
 end
 
 # ╔═╡ 217d073d-c145-4b3d-85c4-eee8d22d1018
 if LuxCUDA.functional()
 	# target_size = (256, 256, 128)
-	target_size = (128, 128, 64)
+	target_size = (64, 64, 64)
 	# target_size = (64, 64, 64)
 else
 	target_size = (64, 64, 32)
@@ -311,7 +308,7 @@ md"""
 train_data, val_data = splitobs(transformed_data; at = 0.75)
 
 # ╔═╡ 4d75f114-225f-45e2-a683-e82ff137d909
-bs = 4
+bs = 2
 
 # ╔═╡ 2032b7e6-ceb7-4c08-9b0d-bc704f5e4104
 begin
@@ -367,9 +364,6 @@ md"""
 # ╔═╡ 0f5d7796-2c3d-4b74-86c1-a1d4e3922011
 image_tfm, label_tfm = getobs(transformed_data, 1);
 
-# ╔═╡ 51e9e7d9-a1d2-4fd1-bdad-52851d9498a6
-typeof(image_tfm), typeof(label_tfm)
-
 # ╔═╡ 6e2bfcfb-77e3-4532-a14d-10f4b91f2f54
 @bind z2 Slider(1:target_size[3], show_value = true, default = div(target_size[3], 2))
 
@@ -387,7 +381,7 @@ let
 		title = "Transformed Label (Overlayed)"
 	)
 	heatmap!(image_tfm[:, :, z2, 1]; colormap = :grays)
-	heatmap!(label_tfm[:, :, z2, 2]; colormap = (:jet, 0.4))
+	heatmap!(label_tfm[:, :, z2, 1]; colormap = (:jet, 0.4))
 	f
 end
 
@@ -602,7 +596,7 @@ begin
             downsample = false
         )
 
-        last_conv = Conv((1, 1, 1), 2 * channel => 2, stride=1, pad=0)
+        last_conv = Chain(Conv((1, 1, 1), 2 * channel => 1, stride=1, pad=0), sigmoid)
 
 		UNet(conv1, conv2, conv3, conv4, conv5, de_conv1, de_conv2, de_conv3, de_conv4, last_conv)
     end
@@ -657,34 +651,28 @@ md"""
 """
 
 # ╔═╡ ca87af51-1e56-48f7-8343-1b4e8fe1c91a
-# begin
-#     struct Scheduler{T, F}<: Optimisers.AbstractRule
-#         constructor::F
-#         schedule::T
-#     end
+begin
+    struct Scheduler{T, F}<: Optimisers.AbstractRule
+        constructor::F
+        schedule::T
+    end
 
-#     _get_opt(scheduler::Scheduler, t) = scheduler.constructor(scheduler.schedule(t))
+    _get_opt(scheduler::Scheduler, t) = scheduler.constructor(scheduler.schedule(t))
 
-#     Optimisers.init(o::Scheduler, x::AbstractArray) =
-#         (t = 1, opt = Optimisers.init(_get_opt(o, 1), x))
+    Optimisers.init(o::Scheduler, x::AbstractArray) =
+        (t = 1, opt = Optimisers.init(_get_opt(o, 1), x))
 
-#     function Optimisers.apply!(o::Scheduler, state, x, dx)
-#         opt = _get_opt(o, state.t)
-#         new_state, new_dx = Optimisers.apply!(opt, state.opt, x, dx)
+    function Optimisers.apply!(o::Scheduler, state, x, dx)
+        opt = _get_opt(o, state.t)
+        new_state, new_dx = Optimisers.apply!(opt, state.opt, x, dx)
 
-#         return (t = state.t + 1, opt = new_state), new_dx
-#     end
-# end
+        return (t = state.t + 1, opt = new_state), new_dx
+    end
+end
 
 # ╔═╡ 0390bcf5-4cd6-49ba-860a-6f94f8ba6ded
-# function create_optimiser(ps)
-#     opt = Scheduler(Exp(λ = 1e-2, γ = 0.8)) do lr Optimisers.Adam(0.0001f0) end
-#     return Optimisers.setup(opt, ps)
-# end
-
-# ╔═╡ 10007ee0-5339-4544-bbcd-ac4eed043f50
 function create_optimiser(ps)
-    opt = Optimisers.ADAM(0.01f0)
+    opt = Scheduler(Exp(λ = 1e-2, γ = 0.8)) do lr Optimisers.Adam(0.1f0) end
     return Optimisers.setup(opt, ps)
 end
 
@@ -693,58 +681,14 @@ md"""
 ## Loss function
 """
 
-# ╔═╡ 8598dfca-8929-4ec3-9eb5-09c240c3fdba
-# function compute_loss(x, y, model, ps, st, epoch)
-#     alpha = max(1.0 - 0.01 * epoch, 0.01)
-#     beta = 1.0 - alpha
-
-#     y_pred, st = model(x, ps, st)
-
-#     y_pred_softmax = softmax(y_pred, dims=4)
-#     y_pred_binary = round.(y_pred_softmax[:, :, :, 2, :])
-#     y_binary = y[:, :, :, 2, :]
-
-#     # Compute loss
-#     loss = 0.0
-#     for b in axes(y, 5)
-#         _y_pred = y_pred_binary[:, :, :, b]
-#         _y = y_binary[:, :, :, b]
-
-# 		local _y_dtm, _y_pred_dtm
-# 		ignore_derivatives() do
-# 			_y_dtm = transform(boolean_indicator(_y))
-# 			_y_pred_dtm = transform(boolean_indicator(_y_pred))
-# 		end
-		
-# 		hd = hausdorff_loss(_y_pred, _y, _y_pred_dtm, _y_dtm)
-# 		dsc = dice_loss(_y_pred, _y)
-# 		loss += alpha * dsc + beta * hd
-#     end
-	
-#     return loss / size(y, 5), y_pred_binary, st
+# ╔═╡ 496712da-3cf0-4fbc-b869-72372e73612b
+# function compute_loss(x, y, model, ps, st) 
+# 	ŷ, st = model(x, ps, st)
+#     loss = dice_loss(ŷ, y)
+#     # loss_dice = 
+#     return loss, ŷ, st
 # end
 
-# ╔═╡ 496712da-3cf0-4fbc-b869-72372e73612b
-function compute_loss(x, y, model, ps, st)
-
-    y_pred, st = model(x, ps, st)
-
-    y_pred_softmax = softmax(y_pred, dims=4)
-    # y_pred_binary = y_pred_softmax[:, :, :, 2, :]
-    # y_binary = y[:, :, :, 2, :]
-
-    # Compute loss
-  #   loss = 0.0
-  #   for b in size(y, 5)
-  #       _y_pred = y_pred_softmax[:, :, :, :, b]
-  #       _y = y[:, :, :, :, b]
-		
-		# dsc = dice_loss(_y_pred, _y)
-		# loss += dsc
-  #   end
-	
-    return dice_loss(y_pred_softmax, y), y_pred, st
-end
 
 # ╔═╡ 45949f7f-4e4a-4857-af43-ff013dbdd137
 md"""
@@ -752,10 +696,43 @@ md"""
 """
 
 # ╔═╡ 402ba194-350e-4ff3-832b-6651be1d9ce7
-dev = gpu_device()
+begin
+	dev = gpu_device()
+	dev_cpu = cpu_device()
+end
+
+# ╔═╡ 8598dfca-8929-4ec3-9eb5-09c240c3fdba
+function compute_loss(x, y, model, ps, st, epoch, HD_kick_in_idx = 30)
+    alpha = 0.01 * max(epoch - HD_kick_in_idx, 0)
+    beta = 1.0 - alpha
+    
+    y_pred, st = model(x, ps, st)
+	loss = beta * dice_loss(y_pred, y)
+    
+    # Compute loss
+	if epoch > HD_kick_in_idx
+		local y_pred_cpu, y_cpu = y_pred |> dev_cpu, y |> dev_cpu
+		local y_pred_dtm, y_dtm = fill(1f3, size(y_pred_cpu)), fill(1f3, size(y_cpu)) 
+	    
+        ignore_derivatives() do
+		    for b in 1:size(y_cpu, 5)
+		        round_y_pred = round.(y_pred_cpu[:, :, :, 1, b])
+				y_dtm[:,:,:,1,b] = transform(boolean_indicator(y_cpu[:, :, :, 1, b]))
+				y_pred_dtm[:,:,:,1,b] = transform(boolean_indicator(round_y_pred))	
+		    end
+			
+		end
+		hd = hausdorff_loss(y_pred_cpu, y_cpu, y_pred_dtm, y_dtm)
+		if !isinf(hd) && !isnan(hd)
+			loss += 1f-6 * alpha * hd
+		end
+	end
+	
+    return loss, y_pred, st
+end
 
 # ╔═╡ bbdaf5c5-9faa-4b61-afab-c0242b8ca034
-model = UNet(8)
+model = UNet(4)
 
 # ╔═╡ 6ec3e34b-1c57-4cfb-a50d-ee786c2e4559
 begin
@@ -769,17 +746,18 @@ md"""
 """
 
 # ╔═╡ 7771246e-911a-482a-a25e-e54e3962cfcd
-function normalize(x)
-	for b in 1:size(x,5)
-		m = mean(x[:,:,:,:,b])
-		s = std(x[:,:,:,:,b])
-	    x[:,:,:,:,b] = (x[:,:,:,:,b] .- m)./s
-	end
-	return x
-end
+# function normalize(x)
+# 	for b in 1:size(x,5)
+# 		m = mean(x[:,:,:,:,b])
+# 		s = std(x[:,:,:,:,b])
+# 	    x[:,:,:,:,b] = (x[:,:,:,:,b] .- m)./s
+# 	end
+# 	return x
+# end
 
 # ╔═╡ 1e79232f-bda2-459a-bc03-85cd8afab3bf
 function train_model(model, ps, st, train_loader, val_loader, num_epochs, dev)
+
     opt_state = create_optimiser(ps)
 
     # Initialize DataFrame to store metrics
@@ -793,27 +771,25 @@ function train_model(model, ps, st, train_loader, val_loader, num_epochs, dev)
     )
 
     for epoch in 1:num_epochs
-        @info "Epoch: $epoch"
+        # @info "Epoch: $epoch"
 
         # Start timing the epoch
         epoch_start_time = now()
 
 		# Training Phase
 		num_batches_train = 0
-		total_train_loss = 0.0
+		total_loss = 0.0
         for (x, y) in train_loader
 			num_batches_train += 1
 			@info "Step: $num_batches_train"
-			x, y = normalize(x) |> dev, y |> dev
+			x, y = x |> dev, y |> dev
 			
             # Forward pass
-            # y_pred, st = Lux.apply(model, x, ps, st)
-            loss, y_pred, st = compute_loss(x, y, model, ps, Lux.testmode(st))
-			total_train_loss += loss
+			loss, _, _ = compute_loss(x, y, model, ps, Lux.testmode(st), epoch)
 			@info "Training Loss: $loss"
-
+            total_loss += loss
             # Backward pass
-			(loss_grad, _, st_), back = Zygote.pullback(p -> compute_loss(x, y, model, p, st), ps)
+			(loss_grad, _, st), back = Zygote.pullback(p -> compute_loss(x, y, model, p, st, epoch), ps)
             gs = back((one(loss_grad), nothing, nothing))[1]
 
             # Update parameters
@@ -823,44 +799,44 @@ function train_model(model, ps, st, train_loader, val_loader, num_epochs, dev)
 		# Calculate and log time taken for the epoch
         epoch_duration = now() - epoch_start_time
 		
-		avg_train_loss = total_train_loss / num_batches_train
+		avg_train_loss = total_loss / num_batches_train
 		@info "avg_train_loss: $avg_train_loss"
 
 		# Validation Phase
-		total_val_loss = 0.0
+		total_loss = 0.0
 		total_dice = 0.0
 		total_hausdorff = 0.0
 		num_batches = 0
+		num_images = 0
 		for (x, y) in val_loader
 			num_batches += 1
-		    x, y = normalize(x) |> dev, y |> dev
+		    x, y = x |> dev, y |> dev
 			
 		    # Forward Pass
-		    y_pred, st = Lux.apply(model, x, ps, st)
-		
+		    y_pred, st = model(x, ps, Lux.testmode(st))
+		    y_pred_cpu, y_cpu = y_pred |> dev_cpu, y |> dev_cpu
 		    # Apply softmax and convert to binary
-		    y_pred_softmax = round.(softmax(y_pred, dims=4))
-		
+		    
 		    # Compute loss
-		    loss, _, _ = compute_loss(x, y, model, ps, Lux.testmode(st))
-		
+		    loss, _, _ = compute_loss(x, y, model, ps, Lux.testmode(st), epoch)
+		    total_loss += loss
 		    # Process batch for metrics
-		    for b in axes(y_pred_softmax, 5)
-		        _y_pred = Bool.(y_pred_softmax[:, :, :, :, b]) |> cpu_device()
-		        _y = Bool.(y[:, :, :, :, b]) |> cpu_device()
+		    for b in axes(y_cpu, 5)
+				num_images += 1
+		        _y_pred = Bool.(round.(y_pred_cpu[:, :, :, 1, b]))
+		        _y = Bool.(y_cpu[:, :, :, 1, b])
 		
-		        total_dice += dice_metric(_y_pred, _y)/size(y_pred_softmax, 5)
-		        # total_hausdorff += hausdorff_metric(_y_pred, _y)
+		        total_dice += dice_metric(_y_pred, _y)
+		        total_hausdorff += hausdorff_metric(_y_pred, _y)
 		    end
 		
-		    total_val_loss += loss
-		    num_batches += 1
+		    
 		end
 		
 		# Calculate average metrics
-		avg_val_loss = total_val_loss / num_batches
-		avg_dice = total_dice / num_batches
-		avg_hausdorff = total_hausdorff / num_batches
+		avg_val_loss = total_loss / num_batches
+		avg_dice = total_dice / num_images
+		avg_hausdorff = total_hausdorff / num_images
 		@info "avg_val_loss: $avg_val_loss"
 		@info "avg_dice: $avg_dice"
 		@info "avg_hausdorff: $avg_hausdorff"
@@ -885,7 +861,7 @@ end
 
 # ╔═╡ a2e88851-227a-4719-8828-6064f9d3ef81
 if LuxCUDA.functional()
-	num_epochs = 20
+	num_epochs = 80
 else
 	num_epochs = 10
 end
@@ -1043,11 +1019,10 @@ end
 # ╠═8e2f2c6d-127d-42a6-9906-970c09a22e61
 # ╟─a6316144-c809-4d2a-bda1-d5128dcf89d3
 # ╠═f8fc2cee-c1bd-477d-9595-9427e8764bd6
-# ╟─7cb986f8-b338-4046-b569-493e443a8dcb
-# ╟─d7e75a72-8281-432c-abab-c254f8c94d3c
+# ╠═7cb986f8-b338-4046-b569-493e443a8dcb
+# ╠═d7e75a72-8281-432c-abab-c254f8c94d3c
 # ╟─9dc89870-3d99-472e-8974-712e34a3a789
-# ╠═0f5d7796-2c3d-4b74-86c1-a1d4e3922011
-# ╠═51e9e7d9-a1d2-4fd1-bdad-52851d9498a6
+# ╟─0f5d7796-2c3d-4b74-86c1-a1d4e3922011
 # ╟─6e2bfcfb-77e3-4532-a14d-10f4b91f2f54
 # ╟─bae79c05-034a-4c39-801a-01229b618e94
 # ╟─1494df6e-f407-42c4-8404-1f4871a2f817
@@ -1075,7 +1050,6 @@ end
 # ╟─7cde37c8-4c59-4583-8995-2b01eda95cb3
 # ╠═ca87af51-1e56-48f7-8343-1b4e8fe1c91a
 # ╠═0390bcf5-4cd6-49ba-860a-6f94f8ba6ded
-# ╠═10007ee0-5339-4544-bbcd-ac4eed043f50
 # ╟─a25bdfe6-b24d-446b-926f-6e0727d647a2
 # ╠═8598dfca-8929-4ec3-9eb5-09c240c3fdba
 # ╠═496712da-3cf0-4fbc-b869-72372e73612b
